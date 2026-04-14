@@ -58,7 +58,6 @@ def build_list_of_scopes():
 
 def configure_scope(scope, is_master):
     # --- Configure the scope range ---
-    print(f"Configuring: {scope.io_resource_descriptor} as Master: {is_master}")
     scope.configure_vertical(
         range=VERTICAL_RANGE,
         coupling=niscope.VerticalCoupling.DC,
@@ -98,7 +97,6 @@ def configure_scope(scope, is_master):
 
 def configure_fgen(fgen):
     # --- Configure the FGEN to output a Square wave to use for edge detection ---
-    print(f"Configuring: {fgen.io_resource_descriptor}")
     fgen.output_mode = nifgen.OutputMode.FUNC   # Select "standard function" mode
     fgen.channels[CHANNEL].configure_standard_waveform(
         waveform=nifgen.Waveform.SQUARE,
@@ -187,7 +185,7 @@ def switch_start_triggers(connect):
         master_sync.connect_trigger_terminals(MASTER_SCOPE_START_TRIGGER_EXPORT, MASTER_SYNC_START_TRIGGER_EXPORT)
         rest_sync.connect_trigger_terminals(REST_SYNC_START_TRIGGER_IMPORT, REST_SCOPE_START_TRIGGER_IMPORT)
     else:
-        # --- Disonnect Start Trigger ---
+        # --- Disconnect Start Trigger ---
         master_sync.disconnect_trigger_terminals(MASTER_SCOPE_START_TRIGGER_EXPORT, MASTER_SYNC_START_TRIGGER_EXPORT)
         rest_sync.disconnect_trigger_terminals(REST_SYNC_START_TRIGGER_IMPORT, REST_SCOPE_START_TRIGGER_IMPORT)
 
@@ -221,7 +219,6 @@ def calibrate_tclk_sample_delay(master_scope, rest_scopes):
     # --- This function lets you adjust any additional delay in your tclk triggering. ---
     sample_clock_delay_ns = TCLK_SAMPLE_DELAY_NS
     sample_clock_delay_sec = sample_clock_delay_ns / 1_000_000_000
-    print(f"Applying master sample clock delay: {sample_clock_delay_ns} ns")
     master_scope.tclk.sample_clock_delay = sample_clock_delay_sec
 
     # --- For now, just adjust master but could adjust rest here ---
@@ -235,6 +232,7 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
     scope_resources = build_list_of_scopes()
 
     # --- Generate Clock from Master Chassis and Connect it to Rest of Chassis ---
+    print(f"Switching: Connecting all clocks and triggers...")
     switch_clock_signals(connect=True)
 
     # --- Connect Ref Trigger from Master Chassis to Rest of Chassis ---
@@ -255,16 +253,19 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
             hardware_session_list =[]
 
             # --- Configure Master Scope ---
+            print(f"Configuring: {master_scope.io_resource_descriptor} as Master: True...")
             configure_scope(master_scope, is_master=True)
 
             # --- Configure Rest of Scopes ---
             for rest_scope in rest_scopes:
+                print(f"Configuring: {rest_scope.io_resource_descriptor} as Master: False...")
                 configure_scope(rest_scope, is_master=False)
 
             # --- Configure TCLK for Start and Ref Trigger as well as Sync Pulse ---
             configure_tclk_sync_pulse(master_scope, rest_scopes)
 
             # --- Apply TCLK calibration ---
+            print(f"Calibrating: Applying TCLK sample clock delay: {TCLK_SAMPLE_DELAY_NS} ns...")
             calibrate_tclk_sample_delay(master_scope, rest_scopes)
 
             # --- Build TCLK hardware list ---
@@ -273,12 +274,15 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
                 hardware_session_list.append(rest_scope)
 
             # --- Send TCLK SYnc Pulse (Determines delay) ---
+            print(f"Calibrating: Sending TCLK sync pulse...")
             nitclk.synchronize(hardware_session_list, 200e-9)
 
             # --- Disconnect Sync Pulse ---
+            print(f"Switching: Disconnect TCLK sync pulse...")
             switch_sync_pulse(connect=False)
 
             # --- Connect Start Triggers ---
+            print(f"Switching: Connect start triggers...")
             switch_start_triggers(connect=True)
 
             # --- Configure FGEN session ---
@@ -286,16 +290,18 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
 
             # --- Start all the scopes ---
             nitclk.initiate(hardware_session_list)
-            print("Waiting: Scopes waiting for reference trigger")
+            print("Waiting: Scopes waiting for reference trigger...")
 
             # --- Start square wave, should trigger master, which should trigger rest of scopes ---
             fgen.initiate()
-            print(f"Generating: {fgen.io_resource_descriptor} is generating")
+            print(f"Generating: {fgen.io_resource_descriptor} is generating...")
 
             # --- Fetch triggered data, calculate offsets using all scopes ---
+            print(f"Fetching: Read all scope buffers...")
             fetched_samples_array, calculated_sample_offset, calculated_time_offset = fetch_and_compare_waveforms(master_scope, rest_scopes)
 
             # --- Stop generating square wave ---
+            print(f"Stopping: Cleaning up refs...")
             fgen.abort()
 
             # --- Stop scopes (Master will stop automatically) ---
@@ -304,6 +310,7 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
                 rest_scope.close()
 
     # --- Disconnect the Ref Trigger ---
+    print(f"Switching: Disconnect all clocks and triggers...")
     switch_ref_triggers(connect=False)
 
     # --- Disconnect the Start Trigger ---
@@ -313,9 +320,10 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
     switch_clock_signals(connect=False)
 
     # --- Print Results ---
+    print(f"*******************************************************************")
     print(f"Result: Sample Offset: {calculated_sample_offset}")
-    print(f"Result: Time Offset (sec): {calculated_time_offset:.9f} s")
     print(f"Result: Time Offset (nsec): {calculated_time_offset * 1_000_000_000:.6f} ns")
+    print(f"*******************************************************************")
 
     # --- Plot Results ---
     plt.figure()

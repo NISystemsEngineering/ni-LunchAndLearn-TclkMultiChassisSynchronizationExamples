@@ -22,6 +22,7 @@ TRIGGER_LEVEL = 0.5
 REFERENCE_POSITION = 50.0
 
 # --- Trigger & Routing Settings ---
+# --- Ref Trigger ---
 MASTER_SCOPE_REF_TRIGGER_EXPORT = PXI_TRIG0
 MASTER_SYNC_REF_TRIGGER_EXPORT = PFI0
 REST_SYNC_REF_TRIGGER_IMPORT = PFI0
@@ -37,7 +38,6 @@ def build_list_of_scopes():
 
 def configure_scope(scope, is_master):
     # --- Configure the scope range ---
-    print(f"Configuring: {scope.io_resource_descriptor} as Master: {is_master}")
     scope.configure_vertical(
         range=VERTICAL_RANGE,
         coupling=niscope.VerticalCoupling.DC,
@@ -74,7 +74,6 @@ def configure_scope(scope, is_master):
 
 def configure_fgen(fgen):
     # --- Configure the FGEN to output a Square wave to use for edge detection ---
-    print(f"Configuring: {fgen.io_resource_descriptor}")
     fgen.output_mode = nifgen.OutputMode.FUNC   # Select "standard function" mode
     fgen.channels[CHANNEL].configure_standard_waveform(
         waveform=nifgen.Waveform.SQUARE,
@@ -163,6 +162,7 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
     scope_resources = build_list_of_scopes()
 
     # --- Generate Clock from Master Chassis and Connect it to Rest of Chassis ---
+    print(f"Switching: Connecting all clocks and triggers...")
     switch_clock_signals(connect=True)
 
     # --- Connect Ref Trigger from Master Chassis to Rest of Chassis ---
@@ -177,29 +177,34 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
             rest_scopes = [niscope.Session(rest_scope) for rest_scope in REST_SCOPES]
 
             # --- Configure Master Scope ---
+            print(f"Configuring: {master_scope.io_resource_descriptor} as Master: True...")
             configure_scope(master_scope, is_master=True)
 
             # --- Configure Rest of Scopes ---
             for rest_scope in rest_scopes:
+                print(f"Configuring: {rest_scope.io_resource_descriptor} as Master: False...")
                 configure_scope(rest_scope, is_master=False)
 
             # --- Configure FGEN session ---
+            print(f"Configuring: {fgen.io_resource_descriptor} as generator")
             configure_fgen(fgen)
 
             # --- Start the rest of the scopes first as they wait on the refer trigger from master, then start master scope ---
             for rest_scope in rest_scopes:
                 rest_scope.initiate()
             master_scope.initiate()
-            print("Waiting: Scopes waiting for reference trigger")
+            print("Waiting: Scopes waiting for reference trigger...")
 
             # --- Start square wave, should trigger master, which should trigger rest of scopes ---
             fgen.initiate()
-            print(f"Generating: {fgen.io_resource_descriptor} is generating")
+            print(f"Generating: {fgen.io_resource_descriptor} is generating...")
 
-            # --- Fetch triggered data, calcuate offsets ---
+            # --- Fetch triggered data, calculate offsets ---
+            print(f"Fetching: Read all scope buffers...")
             fetched_samples_array, calculated_sample_offset, calculated_time_offset = fetch_and_compare_waveforms(master_scope, rest_scopes)
 
             # --- Stop generating square wave ---
+            print(f"Stopping: Cleaning up refs...")
             fgen.abort()
 
             # --- Stop scopes (Master will stop automatically) ---
@@ -208,15 +213,17 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
                 rest_scope.close()
 
     # --- Disconnect the Ref Trigger ---
+    print(f"Switching: Disconnect all clocks and triggers...")
     switch_ref_triggers(connect=False)
 
     # --- Disconnect the Clock ---
     switch_clock_signals(connect=False)
 
     # --- Print Results ---
+    print(f"*******************************************************************")
     print(f"Result: Sample Offset: {calculated_sample_offset}")
-    print(f"Result: Time Offset (sec): {calculated_time_offset:.9f} s")
     print(f"Result: Time Offset (nsec): {calculated_time_offset * 1_000_000_000:.6f} ns")
+    print(f"*******************************************************************")
 
     # --- Plot Results ---
     plt.figure()
