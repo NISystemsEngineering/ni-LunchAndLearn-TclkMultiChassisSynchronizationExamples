@@ -1,8 +1,10 @@
 import niscope
 import nifgen
 import nisync
+import nitclk
 import numpy as np
-from nisync.constants import CLK_OUT, OSCILLATOR, CLK_IN, PXI_CLK10_IN, PXI_TRIG0, PFI0
+from nisync.constants import CLK_OUT, OSCILLATOR, CLK_IN, PXI_CLK10_IN, PXI_TRIG0, PXI_TRIG1, PXI_TRIG2, PXI_TRIG3, \
+    PFI0, PFI1, PFI2, PFI3, SYNC_CLK_FULL_SPEED
 import matplotlib.pyplot as plt
 
 # --- Hardware Configuration Resources ---
@@ -27,6 +29,22 @@ MASTER_SYNC_REF_TRIGGER_EXPORT = PFI0
 REST_SYNC_REF_TRIGGER_IMPORT = PFI0
 REST_SCOPE_REF_TRIGGER_IMPORT = PXI_TRIG0
 
+MASTER_SCOPE_START_TRIGGER_EXPORT = PXI_TRIG1
+MASTER_SYNC_START_TRIGGER_EXPORT = PFI2
+REST_SYNC_START_TRIGGER_IMPORT = PFI1
+REST_SCOPE_START_TRIGGER_IMPORT = PXI_TRIG1
+
+MASTER_SCOPE_START_TRIGGER_EXPORT = PXI_TRIG1
+MASTER_SYNC_START_TRIGGER_EXPORT = PFI2
+REST_SYNC_START_TRIGGER_IMPORT = PFI1
+REST_SCOPE_START_TRIGGER_IMPORT = PXI_TRIG1
+
+MASTER_SCOPE_SYNC_PULSE_EXPORT = PXI_TRIG3
+MASTER_SYNC_SYNC_PULSE_EXPORT = PFI2
+MASTER_SYNC_SYNC_PULSE_IMPORT = PFI1
+MASTER_SCOPE_SYNC_PULSE_IMPORT = PXI_TRIG2
+REST_SYNC_SYNC_PULSE_IMPORT = PFI1
+REST_SCOPE_SYNC_PULSE_IMPORT = PXI_TRIG2
 
 # --- Helper Functions ---
 def configure_scope(scope, is_master):
@@ -58,13 +76,16 @@ def configure_scope(scope, is_master):
             slope=niscope.enums.TriggerSlope.POSITIVE
         )
         scope.exported_ref_trigger_output_terminal = MASTER_SCOPE_REF_TRIGGER_EXPORT
+        scope.exported_start_trigger_output_terminal = MASTER_SCOPE_START_TRIGGER_EXPORT
 
     else:
         # --- Configure the remaining scope reference trigger for digital edge coming from PXI trig lines ---
+        scope.acq_arm_source = REST_SCOPE_START_TRIGGER_IMPORT
         scope.configure_trigger_digital(
             trigger_source = REST_SCOPE_REF_TRIGGER_IMPORT,
             slope=niscope.enums.TriggerSlope.POSITIVE
         )
+    scope.commit()
 
 
 def configure_fgen(fgen):
@@ -137,19 +158,56 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
     # --- Connect the rest sync's PFI input to rest scope expected reference trigger line ---
     rest_sync.connect_trigger_terminals(REST_SYNC_REF_TRIGGER_IMPORT, REST_SCOPE_REF_TRIGGER_IMPORT)
 
+    # --- Connect the master scope's exported sync pulse to master sync's PFI output ---
+    master_sync.connect_trigger_terminals(MASTER_SCOPE_SYNC_PULSE_EXPORT, MASTER_SYNC_SYNC_PULSE_EXPORT, SYNC_CLK_FULL_SPEED)
+    master_sync.connect_trigger_terminals(MASTER_SYNC_SYNC_PULSE_IMPORT, MASTER_SCOPE_SYNC_PULSE_IMPORT)
+
+    # --- Connect the master scope's exported sync pulse to master sync's PFI output ---
+    rest_sync.connect_trigger_terminals(REST_SYNC_SYNC_PULSE_IMPORT, REST_SCOPE_SYNC_PULSE_IMPORT)
+
     with nifgen.Session(FGEN) as fgen:
         # --- Create fgen session ---
         with niscope.Session(MASTER_SCOPE) as master_scope, niscope.Session(REST_SCOPES[0]) as rest_scope:
             # --- Create & configure scope sessions session ---
+            hardware_session_list =[]
+
             configure_scope(master_scope, is_master=True)
             configure_scope(rest_scope, is_master=False)
+
+            master_scope.tclk.start_trigger_master_session = master_scope.tclk
+            master_scope.tclk.sync_pulse_source = MASTER_SCOPE_SYNC_PULSE_IMPORT
+            master_scope.tclk.exported_sync_pulse_output_terminal = MASTER_SCOPE_SYNC_PULSE_EXPORT
+            master_scope.tclk.ref_trigger_master_session = master_scope.tclk
+
+            rest_scope.tclk.start_trigger_master_session = master_scope.tclk
+            rest_scope.tclk.sync_pulse_source = REST_SCOPE_SYNC_PULSE_IMPORT
+            rest_scope.tclk.ref_trigger_master_session = master_scope.tclk
+            
+            sample_clock_delay_ns = -5.25
+            sample_clock_delay_sec = sample_clock_delay_ns / 1_000_000_000
+            print(f"Applying sample clock delay: {sample_clock_delay_ns} ns")
+            master_scope.tclk.sample_clock_delay = sample_clock_delay_sec
+
+            hardware_session_list.append(master_scope)
+            hardware_session_list.append(rest_scope)
+
+            nitclk.synchronize(hardware_session_list, 200e-9)
+
+            # --- Disconnect Sync Pulse ---
+            master_sync.disconnect_trigger_terminals(MASTER_SCOPE_SYNC_PULSE_EXPORT, MASTER_SYNC_SYNC_PULSE_EXPORT)
+            master_sync.disconnect_trigger_terminals(MASTER_SYNC_SYNC_PULSE_IMPORT, MASTER_SCOPE_SYNC_PULSE_IMPORT)
+            rest_sync.disconnect_trigger_terminals(REST_SYNC_SYNC_PULSE_IMPORT, REST_SCOPE_SYNC_PULSE_IMPORT)
+
+            # --- Connect Start Triggers ---
+            master_sync.connect_trigger_terminals(MASTER_SCOPE_START_TRIGGER_EXPORT, MASTER_SYNC_START_TRIGGER_EXPORT)
+            rest_sync.connect_trigger_terminals(REST_SYNC_START_TRIGGER_IMPORT, REST_SCOPE_START_TRIGGER_IMPORT)
 
             # --- Configure fgen sessions session ---
             configure_fgen(fgen)
 
             # --- Start the rest of the scopes first as they wait on the refer trigger from master, then start master scope ---
-            rest_scope.initiate()
-            master_scope.initiate()
+            nitclk.initiate(hardware_session_list)
+
             print("Waiting: Scopes waiting for reference trigger")
 
             # --- Start square wave, should trigger master, which should trigger rest of scopes ---
@@ -165,6 +223,10 @@ with nisync.Session(MASTER_SYNC) as master_sync, nisync.Session(REST_SYNC) as re
     # --- Disconnect the reference triggers ---
     master_sync.disconnect_trigger_terminals(MASTER_SCOPE_REF_TRIGGER_EXPORT, MASTER_SYNC_REF_TRIGGER_EXPORT)
     rest_sync.disconnect_trigger_terminals(REST_SYNC_REF_TRIGGER_IMPORT, REST_SCOPE_REF_TRIGGER_IMPORT)
+
+    # --- Disconnect the start triggers ---
+    master_sync.disconnect_trigger_terminals(MASTER_SCOPE_START_TRIGGER_EXPORT, MASTER_SYNC_START_TRIGGER_EXPORT)
+    rest_sync.disconnect_trigger_terminals(REST_SYNC_START_TRIGGER_IMPORT, REST_SCOPE_START_TRIGGER_IMPORT)
 
     # --- Disconnect the clocks ---
     master_sync.disconnect_clock_terminals(OSCILLATOR, CLK_OUT)
